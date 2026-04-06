@@ -1,0 +1,3 @@
+paho-mqtt>=2.0
+# picamera2 is installed system-wide on Raspberry Pi OS
+# System packages needed: ffmpeg, feh, mpv (apt install ffmpeg feh mpv)
