@@ -71,6 +71,8 @@ TOPIC_STATE = "robot/vision/state"
 TOPIC_HEARTBEAT = "robot/system/heartbeat/vision"
 TOPIC_FRAME_READY = "robot/vision/frame_ready"
 TOPIC_VIDEO_READY = "robot/vision/video_ready"
+TOPIC_CURRENT_STATE = "robot/vision/current_state"
+TOPIC_ERROR_INFO = "robot/vision/error_info"
 
 
 class VisionService:
@@ -108,6 +110,7 @@ class VisionService:
             retain=True,
         )
         self.connected = False
+        self._error_info = "E_OK"
 
     # ------------------------------------------------------------------
     # Camera management
@@ -129,6 +132,7 @@ class VisionService:
             return True
         except Exception as e:
             logger.error("Camera init failed: %s", e)
+            self._set_error("camera init: " + str(e)[:80])
             self._camera = None
             return False
 
@@ -154,9 +158,30 @@ class VisionService:
                 "camera_ready": self._camera is not None,
             }
 
+    def _derive_current_state(self):
+        """Derive human-readable current state from internal flags."""
+        with self._lock:
+            if self._recording:
+                return "recording_video"
+            if self._streaming:
+                return "streaming"
+            if self._displaying:
+                return "displaying"
+            if self._camera is not None:
+                return "ready"
+            return "no_camera"
+
+    def _set_error(self, error):
+        """Set and publish error info."""
+        self._error_info = error
+        if self.connected:
+            self._client.publish(TOPIC_ERROR_INFO, error, qos=1, retain=True)
+
     def _publish_state(self):
         state = {"status": "online", **self._get_state()}
         self._client.publish(TOPIC_STATE, json.dumps(state), qos=1, retain=True)
+        self._client.publish(TOPIC_CURRENT_STATE, self._derive_current_state(), qos=1, retain=True)
+        self._client.publish(TOPIC_ERROR_INFO, self._error_info, qos=1, retain=True)
 
     # ------------------------------------------------------------------
     # MQTT callbacks
@@ -287,6 +312,7 @@ class VisionService:
             )
         except Exception as e:
             logger.error("Recording error: %s", e)
+            self._set_error("recording: " + str(e)[:80])
         finally:
             with self._lock:
                 self._recording = False
