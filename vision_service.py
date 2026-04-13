@@ -65,6 +65,11 @@ CAPTURE_WIDTH = 1920
 CAPTURE_HEIGHT = 1080
 VIDEO_BITRATE = 10_000_000  # 10 Mbps
 
+# Shared-memory frame path for low-latency navigation stream
+SHM_NAV_FRAME = "/dev/shm/qb_nav_frame.jpg"
+SHM_NAV_FRAME_TMP = "/dev/shm/qb_nav_frame.tmp.jpg"
+NAV_STREAM_FPS = 15  # Target capture rate for navigation stream
+
 # MQTT topics
 TOPIC_CMD = "robot/vision/cmd"
 TOPIC_STATE = "robot/vision/state"
@@ -94,6 +99,10 @@ class VisionService:
         # Subprocess / thread management
         self._display_proc = None
         self._record_stop = threading.Event()
+
+        # Navigation stream (continuous capture to shared memory)
+        self._nav_streaming = False
+        self._nav_stream_stop = threading.Event()
 
         # MQTT client
         self._client = mqtt.Client(
@@ -223,6 +232,10 @@ class VisionService:
             resp = self.handle_start_stream()
         elif cmd == "stop_stream":
             resp = self.handle_stop_stream()
+        elif cmd == "start_nav_stream":
+            resp = self.handle_start_nav_stream()
+        elif cmd == "stop_nav_stream":
+            resp = self.handle_stop_nav_stream()
         elif cmd == "stop_display":
             resp = self.handle_stop_display()
         elif cmd == "get_state":
@@ -422,6 +435,60 @@ class VisionService:
 
     # ------------------------------------------------------------------
     # Camera streaming (live preview on display)
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Navigation stream (low-latency continuous capture to shared memory)
+    # ------------------------------------------------------------------
+
+    def handle_start_nav_stream(self):
+        """Start continuous capture to /dev/shm for navigation servoing."""
+        if self._nav_streaming:
+            return {"status": "ok", "message": "Already streaming"}
+        if self._camera is None:
+            return {"status": "error", "message": "Camera not available"}
+
+        self._nav_stream_stop.clear()
+        self._nav_streaming = True
+        thread = threading.Thread(target=self._nav_stream_worker, daemon=True)
+        thread.start()
+        logger.info("Navigation stream started → %s @ %d fps", SHM_NAV_FRAME, NAV_STREAM_FPS)
+        return {"status": "ok", "message": "Navigation stream started"}
+
+    def handle_stop_nav_stream(self):
+        """Stop the navigation continuous capture stream."""
+        if not self._nav_streaming:
+            return {"status": "ok", "message": "Not streaming"}
+        self._nav_stream_stop.set()
+        self._nav_streaming = False
+        # Clean up shared memory file
+        for p in (SHM_NAV_FRAME, SHM_NAV_FRAME_TMP):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        logger.info("Navigation stream stopped")
+        return {"status": "ok", "message": "Navigation stream stopped"}
+
+    def _nav_stream_worker(self):
+        """Continuously capture frames to shared memory at target FPS."""
+        period = 1.0 / NAV_STREAM_FPS
+        while not self._nav_stream_stop.is_set():
+            start = time.monotonic()
+            try:
+                with self._camera_lock:
+                    self._camera.capture_file(SHM_NAV_FRAME_TMP)
+                # Atomic rename so readers never see a partial file
+                os.replace(SHM_NAV_FRAME_TMP, SHM_NAV_FRAME)
+            except Exception as e:
+                logger.debug("Nav stream capture error: %s", e)
+            elapsed = time.monotonic() - start
+            if elapsed < period:
+                self._nav_stream_stop.wait(period - elapsed)
+        self._nav_streaming = False
+
+    # ------------------------------------------------------------------
+    # Display stream (preview)
     # ------------------------------------------------------------------
 
     def handle_start_stream(self):
